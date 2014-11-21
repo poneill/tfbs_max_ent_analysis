@@ -5,16 +5,14 @@ data via likelihood ratio tests.
 """
 from motifs import Escherichia_coli
 from itertools import product
-from utils import verbose_gen,mean,motif_ic,show
-from math import exp,log
+from utils import verbose_gen,mean,motif_ic,show,concat
+from math import exp,log,pi
 import numpy as np
 import random
 from matplotlib import pyplot as plt
 import sys
 sys.path.append("/home/pat")
 from bvh_model import psfm
-# use default value hack to get around lack of proper lexical scoping.
-        # see: http://stackoverflow.com/questions/452610
 
 bases = "ACGT"
 
@@ -31,6 +29,8 @@ def make_mono_fs(L):
     return [lambda site,i=i,b=b:site[i]==b for i in range(L) for b in bases]
     
 def make_di_fs(L):
+    # use default value hack to get around lack of proper lexical scoping.
+        # see: http://stackoverflow.com/questions/452610
     di_fs = [lambda site,i=i,b1=b1,b2=b2:(site[i]==b1 and site[i+1]==b2)
              for i in range(L-1)
              for b1 in bases
@@ -315,3 +315,36 @@ def likelihood_dict():
         sites = getattr(Escherichia_coli,tf)
         d[tf] = (mono_likelihood(sites,tol=10**-3),di_likelihood(sites,tol=10**-3))
     return d
+
+def plot_mono_vs_di_likelihood(ll_dict = None):
+    if ll_dict is None:
+        ll_dict = likelihood_dict()
+    normed_dict = {tf:tuple(map(lambda x:x/float(len(getattr(Escherichia_coli,tf))*len(getattr(Escherichia_coli,tf)[0])),(mono,di))) for (tf,(mono,di)) in ll_dict.items()}
+    plt.scatter(*transpose(ll_dict.values()))
+    for (tf,(mono,di)) in ll_dict.items():
+        sites = getattr(Escherichia_coli,tf)
+        text = "%s\n#:%s\nw:%s\nIC:%1.2f" % (tf,len(sites),len(sites[0]),motif_ic(sites))
+        plt.annotate(text,(mono,di))
+    min_val = min(concat(ll_dict.values()))
+    max_val = max(concat(ll_dict.values()))
+    plt.plot([min_val,max_val],[min_val,max_val],linestyle="--")
+
+def aic(l,k,n):
+    return 2*k - 2*l
+
+def bic(ll,k,n):
+    return -2*ll + k*(log(n) - log(2*pi))
+    
+def info_crit_analysis(ll_dict,crit=bic):
+    """BIC: lower is better"""
+    for tf in Escherichia_coli.tfs:
+        sites = getattr(Escherichia_coli,tf)
+        n = len(sites)
+        w = len(sites[0])
+        mono_k = (4-1)*w
+        di_k = (16-1)*w # how many independent parameters are there, really?
+        #di_k = (4-1)*w
+        mono_ll,di_ll = ll_dict[tf]
+        mono_crit = crit(mono_ll,mono_k,n)
+        di_crit = crit(di_ll,di_k,n)
+        print tf,mono_crit,di_crit,di_crit - mono_crit
