@@ -4,13 +4,17 @@ for each motif, and assess significance."""
 import sys
 AT_LAB = True
 from matplotlib import rc
-rc('text',usetex=True)
+#rc('text',usetex=True)
 sys.path.append("/home/poneill/python_utils")
 from utils import *
 from collections import defaultdict
 import numpy as np
 from matplotlib import pyplot as plt
 from scipy.stats import binom_test
+from tqdm import tqdm
+from scipy.stats import mannwhitneyu,wilcoxon
+from parse_tfbs_data import tfbss
+from motifs import Escherichia_coli
 
 def read_prok_motifs():
     """load prokaryotic motifs into a dictionary of form {motif_name:[site]}"""
@@ -23,19 +27,54 @@ def read_prok_motifs():
             prok_motif_dict[motif].append(site)
     return prok_motif_dict
 
-def compute_motif_pairwise_mis(motif):
+def compute_motif_pairwise_mis(motif,pval=True):
     """For each column pair, return the mi and return them as a
     dictionary of the form: {(i,j):mi}"""
     replicates = 1000
     w = len(motif[0])
     cols = transpose(motif)
     mi_dict = {}
-    for (i,j) in choose2(range(w)):
+    for (i,j) in tqdm(choose2(range(w))):
         xs,ys = cols[i],cols[j]
-        mi_dict[(i,j)] = (mi(xs,ys,correct=False),mi_permute(xs,ys,n=replicates,p_value=True,
+        if pval:
+            mi_dict[(i,j)] = (mi(xs,ys,correct=False),mi_permute(xs,ys,n=replicates,p_value=True,
                                                              mi_method=lambda x,y:mi(x,y,correct=False)))
+        else:
+            mi_dict[(i,j)] = mi(xs,ys,correct=True)
     return mi_dict
 
+def compute_motif_pairwise_mis_properly(motif):
+    replicates = 1000
+    w = len(motif[0])
+    cols = transpose(motif)
+    mi_dict = {(i,j):mi(cols[i],cols[j],correct=False) for (i,j) in choose2(range(w))}
+    perm_dict = defaultdict(list)
+    for rep in tqdm(xrange(replicates),total=replicates):
+        perm_cols = [permute(col) for col in transpose(motif)]
+        for (i,j) in choose2(range(w)):
+            xs,ys = perm_cols[i],perm_cols[j]
+            perm_dict[(i,j)].append(mi(xs,ys,correct=False))
+    return {(i,j):(mi_dict[(i,j)],len(filter(lambda m:m > mi_dict[(i,j)],perm_dict[(i,j)]))/float(replicates))
+            for (i,j) in choose2(range(w))}
+    
+def all_pairwise_mis(properly=True,organism=Escherichia_coli):
+    all_mis = {}
+    for tf in organism.tfs:
+        sites = getattr(organism,tf)
+        if properly:
+            all_mis[tf] = compute_motif_pairwise_mis_properly(sites)
+        else:
+            all_mis[tf] = compute_motif_pairwise_mis(sites)
+    return all_mis
+
+def fdrs_from_all_mis(all_mis,organism=Escherichia_coli):
+    """given all_mis = all_pairwise_mis(),
+    Compute false discovery rates for all motifs"""
+    for tf in organism.tfs:
+        pvals = [p for (m,p) in all_mis[tf].items()]
+        print tf,"False Discovery Rate:",fdr(pvals)
+    
+    
 def generate_distance_distribution(pmd):
     from accession2tf_name import accession2tf_name
     #pmd = read_prok_motifs()
@@ -78,7 +117,22 @@ def plot_distance_distribution2(distance_dict,filename=None):
     plt.scatter(*transpose([(j,p) for j in distance_dict.keys() for p in distance_dict[j]]))
     plt.plot(js,fdrs)
     maybesave(filename)
-    
+
+def plot_distance_distribution3(all_mis,organism=Escherichia_coli):
+    for tf,mi_dict in all_mis.items():
+        sites = getattr(organism,tf)
+        w = len(sites[0])
+        distance_dict = defaultdict(list)
+        for i,j in choose2(range(w)):
+            m,pval = mi_dict[(i,j)]
+            distance_dict[j-i].append(m)
+        #print distance_dict
+        plt.plot(range(1,w),[mean(distance_dict[i]) for i in range(1,w)])
+
+
+
+
+            
 def analyze_pairwise_mi_dict(mi_dict):
     """Given an mi_dict as returned by compute_motif_pairwise_mis,
     pretty print the results"""
@@ -88,16 +142,22 @@ def analyze_pairwise_mi_dict(mi_dict):
     adjacents = 0
     positive_adjacents = 0
     obs_p_dict = {}
+    adjacent_mis = []
+    non_adjacent_mis = []
     for i,j in sorted(mi_dict):
         mi_obs,p_val = mi_dict[(i,j)]
         positive = p_val < 0.05
         positives += positive
         adjacent = (j == i + 1)
         adjacents += adjacent
+        if adjacent:
+            adjacent_mis.append(mi_obs)
+        else:
+            non_adjacent_mis.append(mi_obs)
         positive_adjacents += positive * adjacent
         mi_test_string = "POSITIVE" if positive else "negative"
         obs_p_dict[(i,j)] = (mi_obs,p_val)
-        print i,j,mi_obs,p_val,mi_test_string,("adjacent" if adjacent else "")
+        #print i,j,mi_obs,p_val,mi_test_string,("adjacent" if adjacent else "")
     print "Motif had width:",motif_width
     print "tests:",tests
     print "positives:",positives
@@ -106,8 +166,56 @@ def analyze_pairwise_mi_dict(mi_dict):
     print "positive_adjacents",positive_adjacents
     print "positive_adjacents/positives:",positive_adjacents/float(positives) if positives else 0
     print "adjacencts/tests:",adjacents/float(tests)
+    print "Adjacent mis higher:",mean(adjacent_mis),mean(non_adjacent_mis),mannwhitneyu(adjacent_mis,non_adjacent_mis)
     return obs_p_dict
 
+def test_adjacency_hypothesis_for_all_tfs(all_mis):
+    adjacent_means = []
+    non_adjacent_means = []
+    for tf,mi_dict in all_mis.items():
+        adjacent_mis = []
+        non_adjacent_mis = []
+        for i,j in sorted(mi_dict):
+            mi_obs,p_val = mi_dict[(i,j)]
+            if j == i + 1:
+                adjacent_mis.append(mi_obs)
+            else:
+                non_adjacent_mis.append(mi_obs)
+        adjacent_means.append(mean(adjacent_mis))
+        non_adjacent_means.append(mean(non_adjacent_mis))
+    print mean(adjacent_means),mean(non_adjacent_means),wilcoxon(adjacent_means,non_adjacent_means)
+    return adjacent_means,non_adjacent_means
+
+def plot_adj_hypothesis(filename=None):
+    adj_means,non_adj_means = test_adjacency_hypothesis_for_all_tfs(all_mis)
+    # for adj,non_adj in zip(adj_means,non_adj_means):
+    #     plt.plot([adj,non_adj])
+    plt.scatter(adj_means,non_adj_means)
+    plt.xlabel("Mean Adjacent MI")
+    plt.ylabel("Mean Non-Adjacent MI")
+    plt.plot([0,0.5],[0,0.5],linestyle='--')
+    maybesave(filename)
+
+        
+def plot_ic_vs_mi(tf_or_motif,filename=None,organism=Escherichia_coli,plotting=True):
+    if type(tf_or_motif) is str:
+        tf = tf_or_motif
+        sites = getattr(organism,tf)
+    else:
+        sites = tf_or_motif
+    ics = columnwise_ic(sites,correct=False)
+    mis = [mi(colx,coly,correct=False) for colx,coly in pairs(transpose(sites))]
+    if plotting:
+        plt.plot(ics,label="Information Content")
+        plt.plot([0.5+i for i in range(len(mis))],mis,label="Adjacent MI")
+        plt.ylabel("bits")
+        plt.xlabel("column")
+        plt.legend(loc=0)
+        if type(tf_or_motif) is str:
+            plt.title("Information Content and Mutual Information in %s Binding Motif" % tf)
+        maybesave(filename)
+    return pearsonr(ics[:-1] + ics[1:],mis + mis)
+    
 def main():
     pmd = read_prok_motifs()
     motif_stats = []
@@ -118,9 +226,9 @@ def main():
         print
     return motif_stats
 
-def make_heat_map(tf_name,motif=None,savefig=True,mi_method=mi):
+def make_heat_map(tf_name,motif=None,savefig=True,mi_method=mi,organism=Escherichia_coli):
     if motif is None:
-        motif = getattr(Escherichia_coli,tf_name)
+        motif = getattr(organism,tf_name)
     cols = transpose(motif)
     mis = [[mi_method(x,y) if i + 1 < j else np.nan
             for i,x in enumerate(cols)]
@@ -130,6 +238,7 @@ def make_heat_map(tf_name,motif=None,savefig=True,mi_method=mi):
     plt.title(tf_name)
     plt.xlabel("First Column")
     plt.ylabel("Second Column")
+    plt.colorbar(cax,label="MI (bits)")
     if savefig:
         plt.savefig(tf_name + "_mi_heatmap.png",dpi=400)
 

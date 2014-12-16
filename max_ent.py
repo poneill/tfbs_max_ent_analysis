@@ -4,8 +4,9 @@ mono- and dinucleotide frequencies and determine which better supports
 data via likelihood ratio tests.
 """
 from motifs import Escherichia_coli
+from parse_tfbs_data import tfbss
 from itertools import product
-from utils import verbose_gen,mean,motif_ic,show,concat
+from utils import verbose_gen,mean,motif_ic,show,concat,transpose
 from math import exp,log,pi
 import numpy as np
 import random
@@ -13,6 +14,7 @@ from matplotlib import pyplot as plt
 import sys
 sys.path.append("/home/pat")
 from bvh_model import psfm
+from tqdm import tqdm
 
 bases = "ACGT"
 
@@ -42,17 +44,24 @@ def analytic_mono_lambs(sites,pseudocount=True):
     freqs = psfm(sites,pseudocount)
     return [log(freqs[i][b]/0.25) for i in range(L) for b in range(4)]
 
-def parametrize(sites,eta=1,tol=10**-3,lambs=None,mono=True,transfer_mats=True,debug=False,pseudocount=True):
+def parametrize(sites,eta=1,tol=10**-3,lambs=None,mono=True,transfer_mats=True,debug=False,pseudocount="laplace"):
     L = len(sites[0])
     mono_fs = make_mono_fs(L)
     di_fs = make_di_fs(L)
+    alphabet_size = (4 if mono else 16)
     if mono:
         fs = mono_fs
     else:
         fs = di_fs
     # count one more for each function if pseudocounting
-    ps_num = 1*pseudocount
-    ps_denom = (4 if mono else 16) * pseudocount
+    if pseudocount == "laplace":
+        ps = 1
+    elif pseudocount == "sg":
+        ps = 1.0/alphabet_size
+    else:
+        ps = 10**-50
+    ps_num = 1*ps
+    ps_denom = alphabet_size * ps
     ys = [(sum([f(site) for site in sites]) + ps_num)/float(len(sites)+ps_denom) for f in fs]
     #print ys
     if lambs is None:
@@ -72,21 +81,6 @@ def parametrize(sites,eta=1,tol=10**-3,lambs=None,mono=True,transfer_mats=True,d
                 yhats = [di_fhat(lambs,i,b1,b2,Z=Z) for i in range(L-1) for b1 in bases for b2 in bases]
                 if False:
                     print err
-                    # print "debugging"
-                    # print "computing reference partition"
-                    # Z_ref = compute_partition(L,fs,lambs)
-                    # print "computing yhats_ref"
-                    # yhats_ref = [show(sum(fi(x)*w(x)/Z_ref for x in kmers(L)))
-                    #              for fi in fs]
-                    # print "Z vs Z_ref:",Z,Z_ref
-                    # print "yhats vs yhats_ref:"
-                    # print "L:",L
-                    # for i in range(L-1):
-                    #     for b1 in bases:
-                    #         for b2 in bases:
-                    #             print i,b1,b2,yhats[16*i+4*idx_from_base(b1) + idx_from_base(b2)],yhats_ref[16*i+4*idx_from_base(b1) + idx_from_base(b2)]
-                    # print "len,sum yhats:",len(yhats),sum(yhats)
-                    # print "end debugging"
         else: # if not transfer_mats
             Z = compute_partition(L,fs,lambs)
             yhats = [sum(fi(x)*w(x)/Z for x in kmers(L))
@@ -263,16 +257,16 @@ def test_yhats_ref(lambs):
     for i in range(0,len(yhats),16):
         print sum(yhats_ref[i:i+16]),sum(yhats[i:i+16])
     
-def mono_likelihood(sites,tol=10**-3):
+def mono_likelihood(sites,tol=10**-3,pseudocount="laplace"):
     L = len(sites[0])
-    lambs = parametrize(sites,eta=1,tol=tol,mono=True,debug=False)
+    lambs = parametrize(sites,eta=1,tol=tol,mono=True,debug=False,pseudocount=pseudocount)
     fs = make_mono_fs(L)
     p = make_mono_pdf(fs,lambs)
     return sum(log(p(site)) for site in sites)
 
-def di_likelihood(sites,tol=10**-3):
+def di_likelihood(sites,tol=10**-3,pseudocount="laplace"):
     L = len(sites[0])
-    lambs = parametrize(sites,eta=1,tol=tol,mono=False)
+    lambs = parametrize(sites,eta=1,tol=tol,mono=False,pseudocount=pseudocount)
     fs = make_di_fs(L)
     p = make_di_pdf(fs,lambs)
     return sum(log(p(site)) for site in sites)
@@ -308,14 +302,24 @@ def main_likelihood_experiment():
         plt.savefig("%s_mono_vs_di_ll_w_pseudocount.png" % tf,dpi=300)
         plt.close()
 
-def likelihood_dict():
+def likelihood_dict(pseudocount="laplace"):
     d = {}
-    for tf in Escherichia_coli.tfs:
+    for tf in tqdm(Escherichia_coli.tfs):
         print tf
         sites = getattr(Escherichia_coli,tf)
-        d[tf] = (mono_likelihood(sites,tol=10**-3),di_likelihood(sites,tol=10**-3))
+        d[tf] = (mono_likelihood(sites,tol=10**-3,pseudocount=pseudocount),
+                 di_likelihood(sites,tol=10**-3,pseudocount=pseudocount))
     return d
 
+def full_likelihood_dict(pseudocount="laplace"):
+    d = {}
+    tfbs_dict = make_tfbs_dict()
+    for prt_id in tqdm(tfbs_dict):
+        sites = tfbs_dict[prt_id]
+        d[prt_id] = (mono_likelihood(sites,tol=10**-3,pseudocount=pseudocount),
+                     di_likelihood(sites,tol=10**-3,pseudocount=pseudocount))
+    return d
+    
 def plot_mono_vs_di_likelihood(ll_dict = None):
     if ll_dict is None:
         ll_dict = likelihood_dict()
@@ -327,6 +331,8 @@ def plot_mono_vs_di_likelihood(ll_dict = None):
         plt.annotate(text,(mono,di))
     min_val = min(concat(ll_dict.values()))
     max_val = max(concat(ll_dict.values()))
+    plt.xlabel("Mono LL")
+    plt.ylabel("Di LL")
     plt.plot([min_val,max_val],[min_val,max_val],linestyle="--")
 
 def aic(l,k,n):
@@ -337,14 +343,50 @@ def bic(ll,k,n):
     
 def info_crit_analysis(ll_dict,crit=bic):
     """BIC: lower is better"""
+    print "tf, mono_ll,di_ll,mono_crit,di_crit,di_crit - mono_crit"
+    mono_crits = []
+    di_crits = []
     for tf in Escherichia_coli.tfs:
         sites = getattr(Escherichia_coli,tf)
         n = len(sites)
         w = len(sites[0])
         mono_k = (4-1)*w
-        di_k = (16-1)*w # how many independent parameters are there, really?
+        di_k = ((16-3)*(w-1))
         #di_k = (4-1)*w
         mono_ll,di_ll = ll_dict[tf]
         mono_crit = crit(mono_ll,mono_k,n)
         di_crit = crit(di_ll,di_k,n)
-        print tf,mono_crit,di_crit,di_crit - mono_crit
+        mono_crits.append(mono_crit)
+        di_crits.append(di_crit)
+        print tf,mono_ll,di_ll,mono_crit,di_crit,di_crit - mono_crit
+    plt.scatter(mono_crits,di_crits)
+    min_val = min(mono_crits + di_crits)
+    max_val = max(mono_crits + di_crits)
+    print min_val,max_val
+    plt.plot([min_val,max_val],[min_val,max_val],linestyle="--")
+    plt.xlabel("Mono BIC")
+    plt.ylabel("DI BIC")
+def log2(x):
+    return log(x,2)
+    
+def kl(ps,qs):
+    return sum(p*log2(p/q) for p,q in zip(ps,qs))
+    
+def compare_kls():
+    """Plot kl_mono/base against number of sites.  No relationship."""
+    kl_dict = {}
+    for tf in Escherichia_coli.tfs:
+        sites = getattr(Escherichia_coli,tf)
+        L = len(sites[0])
+        lambs = parametrize(sites)
+        fs = make_mono_fs(L)
+        q = make_mono_pdf(fs,lambs)
+        ps = [sites.count(site)/float(len(sites)) for site in sites]
+        qs = [q(site) for site in sites]
+        plt.close()
+        plt.scatter(ps,qs)
+        plt.loglog()
+        plt.plot([min(ps+qs),min(ps+qs)],[0,0])
+        kl_dict[tf] = kl(ps,qs)
+    return kl_dict
+
